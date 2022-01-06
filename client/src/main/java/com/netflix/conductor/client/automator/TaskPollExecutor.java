@@ -1,30 +1,32 @@
 /*
  * Copyright 2020 Netflix, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * <p>
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ * <p>
+ * http://www.apache.org/licenses/LICENSE-2.0
+ * <p>
+ * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations under the License.
  */
 package com.netflix.conductor.client.automator;
 
 import com.google.common.base.Stopwatch;
 import com.netflix.appinfo.InstanceInfo.InstanceStatus;
+import com.netflix.conductor.client.config.PropertyFactory;
 import com.netflix.conductor.client.http.TaskClient;
 import com.netflix.conductor.client.telemetry.MetricsContainer;
-import com.netflix.conductor.client.worker.PropertyFactory;
 import com.netflix.conductor.client.worker.Worker;
 import com.netflix.conductor.common.metadata.tasks.Task;
 import com.netflix.conductor.common.metadata.tasks.TaskResult;
 import com.netflix.conductor.common.utils.RetryUtil;
 import com.netflix.discovery.EurekaClient;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.concurrent.BasicThreadFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.Map;
@@ -34,11 +36,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import org.apache.commons.lang3.StringUtils;
-import org.apache.commons.lang3.concurrent.BasicThreadFactory;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * Manages the threadpool used by the workers for execution and server communication (polling and task update).
@@ -47,14 +44,15 @@ class TaskPollExecutor {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(TaskPollExecutor.class);
 
-    private EurekaClient eurekaClient;
-    private TaskClient taskClient;
-    private int updateRetryCount;
-    private ExecutorService executorService;
-    private PollingSemaphore pollingSemaphore;
-    private Map<String/*taskType*/, String/*domain*/> taskToDomain;
+    private final EurekaClient eurekaClient;
+    private final TaskClient taskClient;
+    private final int updateRetryCount;
+    private final ExecutorService executorService;
+    private final PollingSemaphore pollingSemaphore;
+    private final Map<String/*taskType*/, String/*domain*/> taskToDomain;
 
     private static final String DOMAIN = "domain";
+    private static final String OVERRIDE_DISCOVERY = "pollOutOfDiscovery";
     private static final String ALL_WORKERS = "all";
 
     TaskPollExecutor(EurekaClient eurekaClient, TaskClient taskClient, int threadCount, int updateRetryCount,
@@ -68,15 +66,20 @@ class TaskPollExecutor {
 
         this.executorService = Executors.newFixedThreadPool(threadCount,
             new BasicThreadFactory.Builder()
-                .namingPattern(workerNamePrefix)
-                .uncaughtExceptionHandler(uncaughtExceptionHandler)
-                .build());
+                    .namingPattern(workerNamePrefix)
+                    .uncaughtExceptionHandler(uncaughtExceptionHandler)
+                    .build());
 
         this.pollingSemaphore = new PollingSemaphore(threadCount);
     }
 
     void pollAndExecute(Worker worker) {
-        if (eurekaClient != null && !eurekaClient.getInstanceRemoteStatus().equals(InstanceStatus.UP)) {
+        Boolean discoveryOverride = Optional.ofNullable(PropertyFactory.getBoolean(worker.getTaskDefName(), OVERRIDE_DISCOVERY, null))
+                .orElseGet(() -> PropertyFactory.getBoolean(ALL_WORKERS, OVERRIDE_DISCOVERY, false));
+
+        if (eurekaClient != null &&
+                !eurekaClient.getInstanceRemoteStatus().equals(InstanceStatus.UP) &&
+                !discoveryOverride) {
             LOGGER.debug("Instance is NOT UP in discovery - will not poll");
             return;
         }
@@ -123,13 +126,9 @@ class TaskPollExecutor {
         }
     }
 
-    void shutdown() {
-        shutdownExecutorService(executorService);
-    }
-
-    void shutdownExecutorService(ExecutorService executorService) {
-        int timeout = 10;
+    void shutdownExecutorService(ExecutorService executorService, int timeout) {
         try {
+            executorService.shutdown();
             if (executorService.awaitTermination(timeout, TimeUnit.SECONDS)) {
                 LOGGER.debug("tasks completed, shutting down");
             } else {
